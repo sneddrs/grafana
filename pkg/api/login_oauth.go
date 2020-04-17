@@ -187,13 +187,17 @@ func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 		rt := models.RoleType(userInfo.Role)
 		if rt.IsValid() {
 			// The user will be assigned a role in either the auto-assigned organization or in the default one
-			var orgID int64
-			if setting.AutoAssignOrg && setting.AutoAssignOrgId > 0 {
-				orgID = int64(setting.AutoAssignOrgId)
+			if userInfo.Orgs != nil {
+				for _, orgID := range userInfo.Orgs {
+					extUser.OrgRoles[orgID] = rt
+				}
+			} else if setting.AutoAssignOrg && setting.AutoAssignOrgId > 0 {
+				orgID := int64(setting.AutoAssignOrgId)
+				extUser.OrgRoles[orgID] = rt
 			} else {
-				orgID = int64(1)
+				orgID := int64(1)
+				extUser.OrgRoles[orgID] = rt
 			}
-			extUser.OrgRoles[orgID] = rt
 		}
 	}
 
