@@ -187,7 +187,7 @@ func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 
 	metrics.MApiLoginOAuth.Inc()
 
-	if redirectTo, _ := url.QueryUnescape(ctx.GetCookie("redirect_to")); len(redirectTo) > 0 {
+	if redirectTo, err := url.QueryUnescape(ctx.GetCookie("redirect_to")); err == nil && len(redirectTo) > 0 {
 		if err := hs.ValidateRedirectTo(redirectTo); err == nil {
 			middleware.DeleteCookie(ctx.Resp, "redirect_to", hs.CookieOptionsFromCfg)
 			ctx.Redirect(redirectTo)
@@ -199,10 +199,12 @@ func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 	ctx.Redirect(setting.AppSubUrl + "/")
 }
 
+// syncUser syncs a Grafana user profile with the corresponding OAuth profile.
 func syncUser(ctx *models.ReqContext, token *oauth2.Token, userInfo *social.BasicUserInfo, name string,
 	connect social.SocialConnector) (*models.User, error) {
+	oauthLogger.Debug("Syncing Grafana user with corresponding OAuth profile")
 	extUser := &models.ExternalUserInfo{
-		AuthModule: "oauth_" + name,
+		AuthModule: fmt.Sprintf("oauth_%s", name),
 		OAuthToken: token,
 		AuthId:     userInfo.Id,
 		Name:       userInfo.Name,
@@ -219,8 +221,12 @@ func syncUser(ctx *models.ReqContext, token *oauth2.Token, userInfo *social.Basi
 			var orgID int64
 			if setting.AutoAssignOrg && setting.AutoAssignOrgId > 0 {
 				orgID = int64(setting.AutoAssignOrgId)
+				logger.Debug("The user has a role assignment and organization membership is auto-assigned",
+					"role", userInfo.Role, "orgId", orgID)
 			} else {
 				orgID = int64(1)
+				logger.Debug("The user has a role assignment and organization membership is not auto-assigned",
+					"role", userInfo.Role, "orgId", orgID)
 			}
 			extUser.OrgRoles[orgID] = rt
 		}
@@ -253,13 +259,12 @@ func syncUser(ctx *models.ReqContext, token *oauth2.Token, userInfo *social.Basi
 		}
 	}
 
-	// add/update user in grafana
+	// add/update user in Grafana
 	cmd := &models.UpsertUserCommand{
 		ReqContext:    ctx,
 		ExternalUser:  extUser,
 		SignupAllowed: connect.IsSignupAllowed(),
 	}
-
 	if err := bus.Dispatch(cmd); err != nil {
 		return nil, err
 	}
