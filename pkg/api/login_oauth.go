@@ -96,7 +96,7 @@ func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 		return
 	}
 
-	// handle call back
+	// handle callback
 	tr := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{
@@ -125,6 +125,7 @@ func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 			ctx.Handle(500, "login.OAuthLogin(Failed to setup TlsClientCa)", nil)
 			return
 		}
+
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(caCert)
 
@@ -172,6 +173,34 @@ func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 		return
 	}
 
+	user, err := syncUser(ctx, token, userInfo, name, connect)
+	if err != nil {
+		hs.redirectWithError(ctx, err)
+		return
+	}
+
+	// login
+	if err := hs.loginUserWithUser(user, ctx); err != nil {
+		hs.redirectWithError(ctx, err)
+		return
+	}
+
+	metrics.MApiLoginOAuth.Inc()
+
+	if redirectTo, _ := url.QueryUnescape(ctx.GetCookie("redirect_to")); len(redirectTo) > 0 {
+		if err := hs.ValidateRedirectTo(redirectTo); err == nil {
+			middleware.DeleteCookie(ctx.Resp, "redirect_to", hs.CookieOptionsFromCfg)
+			ctx.Redirect(redirectTo)
+			return
+		}
+		log.Debugf("Ignored invalid redirect_to cookie value: %v", redirectTo)
+	}
+
+	ctx.Redirect(setting.AppSubUrl + "/")
+}
+
+func syncUser(ctx *models.ReqContext, token *oauth2.Token, userInfo *social.BasicUserInfo, name string,
+	connect social.SocialConnector) (*models.User, error) {
 	extUser := &models.ExternalUserInfo{
 		AuthModule: "oauth_" + name,
 		OAuthToken: token,
@@ -231,39 +260,18 @@ func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 		SignupAllowed: connect.IsSignupAllowed(),
 	}
 
-	err = bus.Dispatch(cmd)
-	if err != nil {
-		hs.redirectWithError(ctx, err)
-		return
+	if err := bus.Dispatch(cmd); err != nil {
+		return nil, err
 	}
 
 	// Do not expose disabled status,
 	// just show incorrect user credentials error (see #17947)
 	if cmd.Result.IsDisabled {
 		oauthLogger.Warn("User is disabled", "user", cmd.Result.Login)
-		hs.redirectWithError(ctx, login.ErrInvalidCredentials)
-		return
+		return nil, login.ErrInvalidCredentials
 	}
 
-	// login
-	err = hs.loginUserWithUser(cmd.Result, ctx)
-	if err != nil {
-		hs.redirectWithError(ctx, err)
-		return
-	}
-
-	metrics.MApiLoginOAuth.Inc()
-
-	if redirectTo, _ := url.QueryUnescape(ctx.GetCookie("redirect_to")); len(redirectTo) > 0 {
-		if err := hs.ValidateRedirectTo(redirectTo); err == nil {
-			middleware.DeleteCookie(ctx.Resp, "redirect_to", hs.CookieOptionsFromCfg)
-			ctx.Redirect(redirectTo)
-			return
-		}
-		log.Debugf("Ignored invalid redirect_to cookie value: %v", redirectTo)
-	}
-
-	ctx.Redirect(setting.AppSubUrl + "/")
+	return cmd.Result, nil
 }
 
 func hashStatecode(code, seed string) string {
